@@ -4,8 +4,14 @@ PyStage is a lightweight ASCII-based video player written in Python.
 It renders video frames as text directly inside the terminal, creating a retro console-style viewing experience.
 
 ---
-
-NOTICE : Due to being written in python, the app might looks large in size.
+😔Audio Notice:
+    - PyStage only plays audio formats that pygame.mixer supports: MP3, OGG, WAV, MIDI, MOD, XM.
+    - Most MP4 videos use AAC audio, which pygame cannot decode.
+    - If your video has no sound, convert its audio to MP3 (keeping video stream).
+    - Recommended free converter: HandBrake (handbrake.fr) or FFmpeg:
+        ffmpeg -i input.mp4 -c:v copy -c:a libmp3lame fixed.mp4
+    - After conversion, audio will work without any extra libraries.
+    - We willadd audio support in near the future.
 
 ---
 ## Features
