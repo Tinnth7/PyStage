@@ -1,5 +1,5 @@
 """
-pystage.py — ASCII video player with color toggle, about dialog, and proper window sizing.
+pystage.py — ASCII video player with color & palette toggles, about dialog.
 
 Requirements:
     pip install opencv-python pillow numpy
@@ -8,7 +8,7 @@ Usage:
     python pystage.py                        # opens file picker
     python pystage.py <video_file>           # load directly
     python pystage.py <video_file> --color   # start with color ON
-    python pystage.py <video_file> --detail  # detailed grayscale palette
+    python pystage.py <video_file> --detail  # start with detailed palette
 """
 
 import cv2
@@ -22,11 +22,11 @@ from tkinter import filedialog, messagebox, ttk, font
 from PIL import Image
 import numpy as np
 
-# ── Char palettes ─────────────────────────────────────────────────────────────
+# Char palettes
 PALETTE_DETAILED = r'@#MW&8%B$*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`. '
 PALETTE_SIMPLE   = "@#S%?*+;:,. "
 
-# ── Theme ──────────────────────────────────────────────────────────────────────
+# Theme
 BG_COLOR = "#0d0d0d"
 FG_COLOR = "#00ff88"
 BAR_BG   = "#1a1a1a"
@@ -38,7 +38,7 @@ ACCENT   = "#00ff88"
 FONT     = "Courier New"
 FONT_SZ  = 9
 
-# ── Color quantization (216 colors, instant) ───────────────────────────────────
+# Color quantization (216 colors, instant)
 COLOR_PALETTE_RGB = []
 for r in range(0, 256, 51):
     for g in range(0, 256, 51):
@@ -46,13 +46,11 @@ for r in range(0, 256, 51):
             COLOR_PALETTE_RGB.append((r, g, b))
 
 def quantize_color_indices(rgb_image):
-    """Convert RGB image (rows, cols, 3) to palette indices using integer division."""
-    r_idx = rgb_image[:, :, 0] // 51  # 0..5
+    r_idx = rgb_image[:, :, 0] // 51
     g_idx = rgb_image[:, :, 1] // 51
     b_idx = rgb_image[:, :, 2] // 51
-    return r_idx * 36 + g_idx * 6 + b_idx  # 0..215
+    return r_idx * 36 + g_idx * 6 + b_idx
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
 def fmt_time(seconds):
     seconds = max(0, int(seconds))
     m, s = divmod(seconds, 60)
@@ -64,7 +62,6 @@ def frame_to_ascii(frame_bgr, cols, rows, palette, use_color=False):
     pil_img = Image.fromarray(img_rgb).resize((cols, rows), Image.BILINEAR)
     pixels = np.array(pil_img)
 
-    # Grayscale for brightness mapping
     gray = (0.299 * pixels[:,:,0] + 0.587 * pixels[:,:,1] + 0.114 * pixels[:,:,2])
     lo, hi = gray.min(), gray.max()
     if hi > lo:
@@ -81,13 +78,13 @@ def frame_to_ascii(frame_bgr, cols, rows, palette, use_color=False):
         return lines, None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 class PyStage:
-    def __init__(self, root, video_path, use_color, palette):
+    def __init__(self, root, video_path, start_color, start_detailed):
         self.root = root
         self.video_path = video_path
-        self.use_color = use_color
-        self.palette = palette
+        self.use_color = start_color
+        self.use_detailed = start_detailed
+        self.palette = PALETTE_DETAILED if start_detailed else PALETTE_SIMPLE
 
         self.paused = False
         self.seeking = False
@@ -112,7 +109,6 @@ class PyStage:
         self._build_ui()
         self._start_playback()
 
-    # ── Open video ─────────────────────────────────────────────────────────────
     def _open_video(self):
         with self.cap_lock:
             if self.cap is not None:
@@ -128,40 +124,42 @@ class PyStage:
             orig_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.vid_aspect = orig_h / max(1, orig_w)
 
-    # ── Build UI ───────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.root.title("🎬 PyStage")
+        self.root.title("PyStage")
         self.root.configure(bg=BG_COLOR)
         self.root.resizable(True, True)
 
         # Title bar
         top = tk.Frame(self.root, bg=BG_COLOR)
         top.pack(fill="x", padx=12, pady=(8, 2))
-        tk.Label(top, text="▶ PyStage", font=(FONT, 13, "bold"),
+        tk.Label(top, text="PyStage", font=(FONT, 13, "bold"),
                  bg=BG_COLOR, fg=TITLE_FG).pack(side="left")
         self.fname_lbl = tk.Label(top, text=f"  {os.path.basename(self.video_path)}",
                                   font=(FONT, 10), bg=BG_COLOR, fg=TIME_FG)
         self.fname_lbl.pack(side="left")
 
-        # Display area
+        # Display area with centering
         self.display = tk.Frame(self.root, bg=BG_COLOR)
         self.display.pack(fill="both", expand=True, padx=4, pady=(2, 0))
         self.display.bind("<Configure>", self._on_display_resize)
 
-        # Text widget (centered originally, but we'll let it fill)
+        self.center_frame = tk.Frame(self.display, bg=BG_COLOR)
+        self.center_frame.place(relx=0.5, rely=0.5, anchor="center")
+
         self.text = tk.Text(
-            self.display,
+            self.center_frame,
             font=(FONT, FONT_SZ),
             bg=BG_COLOR, fg=FG_COLOR,
             insertwidth=0, relief="flat",
             state="disabled", wrap="none", cursor="arrow",
         )
-        self.text.pack(fill="both", expand=True)
+        self.text.pack()
 
         # Controls
         ctrl = tk.Frame(self.root, bg=BAR_BG, pady=8)
         ctrl.pack(fill="x", side="bottom")
 
+        # Progress bar row
         prog_row = tk.Frame(ctrl, bg=BAR_BG)
         prog_row.pack(fill="x", padx=14, pady=(4, 2))
 
@@ -180,29 +178,37 @@ class PyStage:
         self.progress.bind("<ButtonPress-1>", lambda e: self._seek_press())
         self.progress.bind("<ButtonRelease-1>", lambda e: self._seek_release())
 
-        btn_row = tk.Frame(ctrl, bg=BAR_BG)
-        btn_row.pack(pady=(4, 4))
+        # Button row 1: Pause, Play, Restart
+        btn_row1 = tk.Frame(ctrl, bg=BAR_BG)
+        btn_row1.pack(pady=(4, 0))
 
-        self.play_btn = self._btn(btn_row, "⏸  Pause", self._toggle_pause)
+        self.play_btn = self._btn(btn_row1, "⏸ Pause" if not self.paused else "▶ Play", self._toggle_pause)
         self.play_btn.pack(side="left", padx=5)
 
-        self._btn(btn_row, "⏮  Restart", self._restart).pack(side="left", padx=5)
+        self._btn(btn_row1, "↺ Restart", self._restart).pack(side="left", padx=5)
 
-        self.color_btn = self._btn(btn_row, "🎨 Color: ON" if self.use_color else "🎨 Color: OFF",
-                                   self._toggle_color)
+        # Button row 2: Open, Color, Palette, About, Quit
+        btn_row2 = tk.Frame(ctrl, bg=BAR_BG)
+        btn_row2.pack(pady=(4, 4))
+
+        self._btn(btn_row2, "Open", self._open_new).pack(side="left", padx=5)
+
+        self.color_btn = self._btn(btn_row2, "Color: ON" if self.use_color else "Color: OFF", self._toggle_color)
         self.color_btn.pack(side="left", padx=5)
 
-        self._btn(btn_row, "📂  Open", self._open_new).pack(side="left", padx=5)
+        self.palette_btn = self._btn(btn_row2, "Palette: Detailed" if self.use_detailed else "Palette: Simple", self._toggle_palette)
+        self.palette_btn.pack(side="left", padx=5)
 
-        # About button
-        self._btn(btn_row, "❓ About", self._show_about).pack(side="left", padx=5)
+        self._btn(btn_row2, "About", self._show_about).pack(side="left", padx=5)
 
-        self._btn(btn_row, "✕  Quit", self._quit, fg="#ff4444").pack(side="left", padx=5)
+        self._btn(btn_row2, "✕ Quit", self._quit, fg="#ff4444").pack(side="left", padx=5)
 
+        # Keyboard shortcuts
         self.root.bind("<space>", lambda e: self._toggle_pause())
         self.root.bind("<Escape>", lambda e: self._quit())
         self.root.bind("<r>", lambda e: self._restart())
         self.root.bind("<c>", lambda e: self._toggle_color())
+        self.root.bind("<p>", lambda e: self._toggle_palette())
         self.root.bind("<a>", lambda e: self._show_about())
         self.root.bind("<A>", lambda e: self._show_about())
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
@@ -218,7 +224,7 @@ class PyStage:
         if content_w_from_h < win_w:
             win_w = max(480, content_w_from_h + 8)
         self.root.geometry(f"{win_w}x{win_h}")
-        # NOTE: maxsize is NOT set – window can fill screen properly
+        # No maxsize – window can be maximized fully
 
         self.root.after(150, self._measure_char)
 
@@ -239,7 +245,6 @@ class PyStage:
         b.bind("<Leave>", lambda e: b.config(bg=BTN_BG))
         return b
 
-    # ── Measure character size ─────────────────────────────────────────────────
     def _measure_char(self):
         try:
             f = font.Font(family=FONT, size=FONT_SZ)
@@ -261,7 +266,6 @@ class PyStage:
                 self._char_h = FONT_SZ * 1.35
         self._recalc_grid()
 
-    # ── Grid recalculation ─────────────────────────────────────────────────────
     def _recalc_grid(self):
         if self._char_w is None:
             return
@@ -277,16 +281,16 @@ class PyStage:
             cols = max(10, int(rows * char_aspect / self.vid_aspect))
         self.ascii_cols = cols
         self.ascii_rows = rows
-        # No need to set text widget size precisely – it's already filling with pack(fill=both)
-        # But we keep as reference for frame conversion
-        self.text.config(width=cols, height=rows)   # helps with initial sizing
+        self.text.config(width=cols, height=rows)
+        px_w = int(cols * self._char_w)
+        px_h = int(rows * self._char_h)
+        self.center_frame.config(width=px_w, height=px_h)
 
     def _on_display_resize(self, event):
         if self._resize_after_id:
             self.root.after_cancel(self._resize_after_id)
         self._resize_after_id = self.root.after(80, self._recalc_grid)
 
-    # ── Seek handling ──────────────────────────────────────────────────────────
     def _seek_press(self):
         self.seeking = True
 
@@ -299,10 +303,9 @@ class PyStage:
         fi = int(float(val))
         self.time_var.set(f"{fmt_time(fi / self.fps)} / {fmt_time(self.total_frames / self.fps)}")
 
-    # ── Controls ───────────────────────────────────────────────────────────────
     def _toggle_pause(self):
         self.paused = not self.paused
-        self.play_btn.config(text="▶  Play " if self.paused else "⏸  Pause")
+        self.play_btn.config(text="⏸ Pause" if not self.paused else "▶ Play")
 
     def _restart(self):
         with self.cap_lock:
@@ -312,7 +315,12 @@ class PyStage:
 
     def _toggle_color(self):
         self.use_color = not self.use_color
-        self.color_btn.config(text="🎨 Color: ON" if self.use_color else "🎨 Color: OFF")
+        self.color_btn.config(text="Color: ON" if self.use_color else "Color: OFF")
+
+    def _toggle_palette(self):
+        self.use_detailed = not self.use_detailed
+        self.palette = PALETTE_DETAILED if self.use_detailed else PALETTE_SIMPLE
+        self.palette_btn.config(text="Palette: Detailed" if self.use_detailed else "Palette: Simple")
 
     def _show_about(self):
         about_win = tk.Toplevel(self.root)
@@ -328,20 +336,20 @@ class PyStage:
 
         tk.Label(frame, text="PyStage", font=(FONT, 18, "bold"),
                  bg=BG_COLOR, fg=ACCENT).pack(pady=(0, 5))
-        tk.Label(frame, text="Beta v0.2 HOTFIX", font=(FONT, 10),
+        tk.Label(frame, text="Beta v0.4", font=(FONT, 10),
                  bg=BG_COLOR, fg=TIME_FG).pack()
 
         tk.Frame(frame, height=2, bg=ACCENT).pack(fill="x", pady=15)
 
         github_url = "https://github.com/Tinnth7/PyStage"
-        github_link = tk.Label(frame, text=f"📦 GitHub: {github_url}",
+        github_link = tk.Label(frame, text=f"GitHub: {github_url}",
                                font=(FONT, 10), bg=BG_COLOR, fg=FG_COLOR,
                                cursor="hand2")
         github_link.pack(anchor="w", pady=2)
         github_link.bind("<Button-1>", lambda e: webbrowser.open(github_url))
 
         creator_url = "https://www.comradelituz.straw.page"
-        creator_link = tk.Label(frame, text=f"👤 Creator: {creator_url}",
+        creator_link = tk.Label(frame, text=f"Creator: {creator_url}",
                                 font=(FONT, 10), bg=BG_COLOR, fg=FG_COLOR,
                                 cursor="hand2")
         creator_link.pack(anchor="w", pady=2)
@@ -373,7 +381,7 @@ class PyStage:
         self._recalc_grid()
         self.running = True
         self.paused = False
-        self.play_btn.config(text="⏸  Pause")
+        self.play_btn.config(text="⏸ Pause")
         self._start_playback()
 
     def _quit(self):
@@ -383,7 +391,6 @@ class PyStage:
                 self.cap.release()
         self.root.after(200, self.root.destroy)
 
-    # ── Playback thread ────────────────────────────────────────────────────────
     def _start_playback(self):
         threading.Thread(target=self._play_loop, daemon=True).start()
 
@@ -427,7 +434,6 @@ class PyStage:
             else:
                 next_frame_time = time.perf_counter() + frame_interval
 
-    # ── Render ASCII with or without color ─────────────────────────────────────
     def _init_color_tags(self):
         if self._color_tags_initialized:
             return
@@ -468,15 +474,13 @@ class PyStage:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="PyStage — ASCII video player")
     parser.add_argument("video", nargs="?", default=None)
     parser.add_argument("--color", action="store_true", help="Start with color mode ON")
-    parser.add_argument("--detail", action="store_true", help="Use detailed grayscale palette")
+    parser.add_argument("--detail", action="store_true", help="Start with detailed palette")
     args = parser.parse_args()
 
-    palette = PALETTE_DETAILED if args.detail else PALETTE_SIMPLE
     root = tk.Tk()
 
     video_path = args.video
@@ -494,7 +498,7 @@ def main():
         root.lift()
         root.focus_force()
 
-    PyStage(root, video_path, args.color, palette)
+    PyStage(root, video_path, args.color, args.detail)
     root.mainloop()
 
 
