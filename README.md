@@ -4,7 +4,8 @@ PyStage is a lightweight ASCII-based video player written in Python.
 It renders video frames as text directly inside the terminal, creating a retro console-style viewing experience.
 
 ---
-
+NOTICE : Due to being written in python, the app might looks large in size.
+---
 ## Features
 
 - Real-time ASCII video playback
