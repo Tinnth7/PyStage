@@ -43,18 +43,6 @@ It renders video frames as text directly inside the terminal, creating a retro c
 - Complete the installation
 - Done!
 
-
-## Project Structure
-
-```text
-PyStage/
-├── _Installer/
-├── main.py
-├── pystage.ico
-├── LICENSE
-└── .gitignore
-```
-
 ---
 
 ## Roadmap
