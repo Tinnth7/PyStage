@@ -564,7 +564,7 @@ class PyStage:
 
         tk.Label(frame, text="PyStage", font=(FONT, 18, "bold"),
                  bg=BG_COLOR, fg=ACCENT).pack(pady=(0, 5))
-        tk.Label(frame, text="Version 1.9 – Video & Image Viewer", font=(FONT, 10),
+        tk.Label(frame, text="Version 0.5 – Video & Image Viewer", font=(FONT, 10),
                  bg=BG_COLOR, fg=TIME_FG).pack()
 
         tk.Frame(frame, height=2, bg=ACCENT).pack(fill="x", pady=15)

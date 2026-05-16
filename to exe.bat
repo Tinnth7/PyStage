@@ -1,0 +1,1 @@
+pyinstaller --onefile --windowed --name PyStage --icon=pystage.ico main.py
