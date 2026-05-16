@@ -18,6 +18,8 @@ from tkinter import filedialog, messagebox, ttk, font
 from PIL import Image
 import numpy as np
 
+print("Script started", flush=True)
+
 # ── Char palettes (dark→dense, bright→sparse) ─────────────────────────────────
 PALETTE_DETAILED = r'@#MW&8%B$*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`. '
 PALETTE_SIMPLE   = "@#S%?*+;:,. "
