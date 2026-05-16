@@ -1,15 +1,11 @@
 """
-pystage.py — ASCII video player with its own window, play/pause & progress bar!
-
-Requirements:
-    pip install opencv-python pillow numpy
-    (tkinter is built into Python — no install needed)
+pystage.py — ASCII video player with color toggle in UI.
 
 Usage:
     python pystage.py                        # opens file picker
     python pystage.py <video_file>           # load directly
-    python pystage.py <video_file> --color   # with color
-    python pystage.py <video_file> --detail  # detailed palette
+    python pystage.py <video_file> --color   # start with color ON
+    python pystage.py <video_file> --detail  # detailed grayscale palette
 """
 
 import cv2
@@ -18,7 +14,7 @@ import time
 import argparse
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, font
 from PIL import Image
 import numpy as np
 
@@ -36,7 +32,35 @@ TIME_FG  = "#888888"
 TITLE_FG = "#ffffff"
 ACCENT   = "#00ff88"
 FONT     = "Courier New"
-FONT_SZ  = 9          # fixed readable size; window resize changes cols/rows, not font
+FONT_SZ  = 9
+
+# ── Color quantization (216 colors: 6x6x6 RGB cube) ───────────────────────────
+def build_color_palette():
+    """Create a list of 216 RGB tuples and corresponding Tkinter color names."""
+    colors = []
+    for r in range(0, 256, 51):      # 0, 51, 102, 153, 204, 255
+        for g in range(0, 256, 51):
+            for b in range(0, 256, 51):
+                colors.append((r, g, b))
+    # Precompute nearest neighbor lookup table for 256x256x256 RGB space
+    lookup = np.zeros((256, 256, 256), dtype=np.uint8)
+    for r in range(256):
+        for g in range(256):
+            for b in range(256):
+                best_idx = 0
+                best_dist = 195075
+                for i, (pr, pg, pb) in enumerate(colors):
+                    dr = r - pr
+                    dg = g - pg
+                    db = b - pb
+                    dist = dr*dr + dg*dg + db*db
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
+                lookup[r, g, b] = best_idx
+    return colors, lookup
+
+COLOR_PALETTE_RGB, COLOR_LOOKUP = build_color_palette()
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def fmt_time(seconds):
@@ -45,50 +69,55 @@ def fmt_time(seconds):
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-
-def frame_to_ascii(frame_bgr, cols, rows, palette):
+def frame_to_ascii(frame_bgr, cols, rows, palette, use_color=False):
+    """Convert frame to ASCII lines and (if color) a matrix of color indices."""
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb).resize((cols, rows), Image.LANCZOS)
-    pixels  = np.array(pil_img)
-    gray    = (0.299 * pixels[:,:,0] +
-               0.587 * pixels[:,:,1] +
-               0.114 * pixels[:,:,2])
-    lo, hi  = gray.min(), gray.max()
+    pil_img = Image.fromarray(img_rgb).resize((cols, rows), Image.BILINEAR)
+    pixels = np.array(pil_img)
+
+    # Grayscale for brightness mapping
+    gray = (0.299 * pixels[:,:,0] + 0.587 * pixels[:,:,1] + 0.114 * pixels[:,:,2])
+    lo, hi = gray.min(), gray.max()
     if hi > lo:
         gray = (gray - lo) / (hi - lo) * 255.0
-    n       = len(palette) - 1
+    n = len(palette) - 1
     indices = (gray / 255.0 * n).astype(int).clip(0, n)
-    lines   = ["".join(palette[indices[y, x]] for x in range(cols))
-               for y in range(rows)]
-    return lines, pixels
+
+    lines = ["".join(palette[indices[y, x]] for x in range(cols)) for y in range(rows)]
+
+    if use_color:
+        color_indices = COLOR_LOOKUP[pixels[:,:,0], pixels[:,:,1], pixels[:,:,2]]
+        return lines, color_indices
+    else:
+        return lines, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 class PyStage:
     def __init__(self, root, video_path, use_color, palette):
-        self.root        = root
-        self.video_path  = video_path
-        self.use_color   = use_color
-        self.palette     = palette
+        self.root = root
+        self.video_path = video_path
+        self.use_color = use_color          # can be toggled later
+        self.palette = palette
 
-        self.paused      = False
-        self.seeking     = False
-        self.running     = True
+        self.paused = False
+        self.seeking = False
+        self.running = True
         self._seek_frame = None
-        self.cap         = None
-        self.total_frames= 1
-        self.fps         = 24
-        self.vid_aspect  = 9 / 16   # h/w ratio, updated from file
+        self.cap = None
+        self.total_frames = 1
+        self.fps = 24
+        self.vid_aspect = 9 / 16
 
-        # Current ASCII grid size — derived from widget size each frame
-        self.ascii_cols  = 80
-        self.ascii_rows  = 24
+        self.cap_lock = threading.Lock()
 
-        # Char cell size in pixels (measured after first render)
-        self._char_w     = None
-        self._char_h     = None
+        self.ascii_cols = 80
+        self.ascii_rows = 24
+        self._char_w = None
+        self._char_h = None
 
-        self._resize_after_id = None   # debounce resize events
+        self._resize_after_id = None
+        self._color_tags_initialized = False
 
         self._open_video()
         self._build_ui()
@@ -96,16 +125,19 @@ class PyStage:
 
     # ── Open video ─────────────────────────────────────────────────────────────
     def _open_video(self):
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
-            messagebox.showerror("PyStage", f"Cannot open:\n{self.video_path}")
-            self.root.destroy()
-            return
-        self.fps          = self.cap.get(cv2.CAP_PROP_FPS) or 24
-        self.total_frames = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)))
-        orig_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.vid_aspect   = orig_h / max(1, orig_w)   # pure pixel aspect
+        with self.cap_lock:
+            if self.cap is not None:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(self.video_path)
+            if not self.cap.isOpened():
+                messagebox.showerror("PyStage", f"Cannot open:\n{self.video_path}")
+                self.root.destroy()
+                return
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 24
+            self.total_frames = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+            orig_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            orig_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.vid_aspect = orig_h / max(1, orig_w)
 
     # ── Build UI ───────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -113,21 +145,21 @@ class PyStage:
         self.root.configure(bg=BG_COLOR)
         self.root.resizable(True, True)
 
-        # ── Title bar ──
+        # Title bar
         top = tk.Frame(self.root, bg=BG_COLOR)
         top.pack(fill="x", padx=12, pady=(8, 2))
         tk.Label(top, text="▶ PyStage", font=(FONT, 13, "bold"),
                  bg=BG_COLOR, fg=TITLE_FG).pack(side="left")
         self.fname_lbl = tk.Label(top, text=f"  {os.path.basename(self.video_path)}",
-                 font=(FONT, 10), bg=BG_COLOR, fg=TIME_FG)
+                                  font=(FONT, 10), bg=BG_COLOR, fg=TIME_FG)
         self.fname_lbl.pack(side="left")
 
-        # ── ASCII display ──
-        # Outer frame fills all available space (used to measure pixel room)
+        # Display area
         self.display = tk.Frame(self.root, bg=BG_COLOR)
         self.display.pack(fill="both", expand=True, padx=4, pady=(2, 0))
+        self.display.bind("<Configure>", self._on_display_resize)
 
-        # Inner centering frame — text widget sits inside this, centered
+        # Centering frame
         self.center_frame = tk.Frame(self.display, bg=BG_COLOR)
         self.center_frame.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -140,7 +172,7 @@ class PyStage:
         )
         self.text.pack()
 
-        # ── Controls ──
+        # Controls
         ctrl = tk.Frame(self.root, bg=BAR_BG, pady=8)
         ctrl.pack(fill="x", side="bottom")
 
@@ -159,103 +191,45 @@ class PyStage:
         )
         self._style_scale()
         self.progress.pack(fill="x", expand=True, side="left")
-        self.progress.bind("<ButtonPress-1>",   lambda e: self._seek_press())
+        self.progress.bind("<ButtonPress-1>", lambda e: self._seek_press())
         self.progress.bind("<ButtonRelease-1>", lambda e: self._seek_release())
 
         btn_row = tk.Frame(ctrl, bg=BAR_BG)
         btn_row.pack(pady=(4, 4))
-        self.play_btn = self._btn(btn_row, "⏸  Pause",   self._toggle_pause)
-        self.play_btn.pack(side="left", padx=5)
-        self._btn(btn_row, "⏮  Restart", self._restart).pack(side="left", padx=5)
-        self._btn(btn_row, "📂  Open",   self._open_new).pack(side="left", padx=5)
-        self._btn(btn_row, "✕  Quit",    self._quit, fg="#ff4444").pack(side="left", padx=5)
 
-        self.root.bind("<space>",     lambda e: self._toggle_pause())
-        self.root.bind("<Escape>",    lambda e: self._quit())
-        self.root.bind("<r>",         lambda e: self._restart())
-        self.root.bind("<Configure>", self._on_window_resize)
+        self.play_btn = self._btn(btn_row, "⏸  Pause", self._toggle_pause)
+        self.play_btn.pack(side="left", padx=5)
+
+        self._btn(btn_row, "⏮  Restart", self._restart).pack(side="left", padx=5)
+
+        # ── NEW: Color toggle button ─────────────────────────────────────────
+        self.color_btn = self._btn(btn_row, "🎨 Color: ON" if self.use_color else "🎨 Color: OFF",
+                                   self._toggle_color)
+        self.color_btn.pack(side="left", padx=5)
+
+        self._btn(btn_row, "📂  Open", self._open_new).pack(side="left", padx=5)
+        self._btn(btn_row, "✕  Quit", self._quit, fg="#ff4444").pack(side="left", padx=5)
+
+        self.root.bind("<space>", lambda e: self._toggle_pause())
+        self.root.bind("<Escape>", lambda e: self._quit())
+        self.root.bind("<r>", lambda e: self._restart())
+        self.root.bind("<c>", lambda e: self._toggle_color())   # keyboard shortcut
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
-        # Cap initial window to 90% of screen so it never spawns off-screen
-        # on machines with small or huge displays
+        # Initial window size
         scr_w = self.root.winfo_screenwidth()
         scr_h = self.root.winfo_screenheight()
         win_w = min(960, int(scr_w * 0.90))
         win_h = min(620, int(scr_h * 0.90))
-        # Also respect video aspect: try to pre-size window to match
-        # video ratio (controls bar ~110px, title ~38px)
         ui_overhead_h = 148
-        content_h     = win_h - ui_overhead_h
-        content_w_from_h = int(content_h / self.vid_aspect)   # pixel width for that height
+        content_h = win_h - ui_overhead_h
+        content_w_from_h = int(content_h / self.vid_aspect) if self.vid_aspect else 480
         if content_w_from_h < win_w:
             win_w = max(480, content_w_from_h + 8)
         self.root.geometry(f"{win_w}x{win_h}")
         self.root.maxsize(int(scr_w * 0.98), int(scr_h * 0.95))
-        # Measure char metrics after first paint
+
         self.root.after(150, self._measure_char)
-
-    # ── Measure a single char's pixel size (done once after UI is drawn) ───────
-    def _measure_char(self):
-        # Insert a test char, read bbox, delete it
-        self.text.config(state="normal")
-        self.text.insert("1.0", "X")
-        self.root.update_idletasks()
-        bbox = self.text.bbox("1.0")
-        self.text.delete("1.0", "end")
-        self.text.config(state="disabled")
-
-        if bbox:
-            _, _, cw, ch = bbox
-            self._char_w = max(1, cw)
-            self._char_h = max(1, ch)
-        else:
-            # Fallback estimate
-            self._char_w = FONT_SZ * 0.62
-            self._char_h = FONT_SZ * 1.35
-
-        self._recalc_grid()
-
-    # ── Recalculate how many cols/rows fit the display frame ────────────────
-    def _recalc_grid(self):
-        if self._char_w is None:
-            return
-        self.root.update_idletasks()
-        w = self.display.winfo_width()
-        h = self.display.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        # Char aspect ratio (monospace chars are taller than wide, ~2:1)
-        char_aspect = self._char_h / self._char_w
-
-        # Fit cols & rows inside the available pixel space while
-        # preserving the video's original aspect ratio
-        # Try fitting by width first
-        cols = max(10, int(w / self._char_w))
-        rows = max(4,  int(cols * self.vid_aspect / char_aspect))
-
-        # If that's too tall, fit by height instead
-        if rows * self._char_h > h:
-            rows = max(4, int(h / self._char_h))
-            cols = max(10, int(rows * char_aspect / self.vid_aspect))
-
-        self.ascii_cols = cols
-        self.ascii_rows = rows
-
-        # Resize the text widget to exactly the grid's pixel footprint
-        # so it stays truly centered with no leftover space
-        px_w = int(cols * self._char_w)
-        px_h = int(rows * self._char_h)
-        self.text.config(width=cols, height=rows)
-        self.center_frame.config(width=px_w, height=px_h)
-
-    # ── Debounced resize handler ───────────────────────────────────────────────
-    def _on_window_resize(self, event):
-        if event.widget is not self.root:
-            return
-        if self._resize_after_id:
-            self.root.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.root.after(80, self._recalc_grid)
 
     def _style_scale(self):
         s = ttk.Style()
@@ -274,12 +248,61 @@ class PyStage:
         b.bind("<Leave>", lambda e: b.config(bg=BTN_BG))
         return b
 
-    # ── Seek ───────────────────────────────────────────────────────────────────
+    # ── Measure character size ─────────────────────────────────────────────────
+    def _measure_char(self):
+        try:
+            f = font.Font(family=FONT, size=FONT_SZ)
+            self._char_w = f.measure("X")
+            self._char_h = f.metrics("linespace")
+        except:
+            self.text.config(state="normal")
+            self.text.insert("1.0", "X")
+            self.root.update_idletasks()
+            bbox = self.text.bbox("1.0")
+            self.text.delete("1.0", "end")
+            self.text.config(state="disabled")
+            if bbox:
+                _, _, cw, ch = bbox
+                self._char_w = max(1, cw)
+                self._char_h = max(1, ch)
+            else:
+                self._char_w = FONT_SZ * 0.62
+                self._char_h = FONT_SZ * 1.35
+        self._recalc_grid()
+
+    # ── Grid recalculation ─────────────────────────────────────────────────────
+    def _recalc_grid(self):
+        if self._char_w is None:
+            return
+        w = self.display.winfo_width()
+        h = self.display.winfo_height()
+        if w < 10 or h < 10:
+            return
+        char_aspect = self._char_h / self._char_w
+        cols = max(10, int(w / self._char_w))
+        rows = max(4, int(cols * self.vid_aspect / char_aspect))
+        if rows * self._char_h > h:
+            rows = max(4, int(h / self._char_h))
+            cols = max(10, int(rows * char_aspect / self.vid_aspect))
+        self.ascii_cols = cols
+        self.ascii_rows = rows
+        self.text.config(width=cols, height=rows)
+        px_w = int(cols * self._char_w)
+        px_h = int(rows * self._char_h)
+        self.center_frame.config(width=px_w, height=px_h)
+
+    def _on_display_resize(self, event):
+        if self._resize_after_id:
+            self.root.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.root.after(80, self._recalc_grid)
+
+    # ── Seek handling ──────────────────────────────────────────────────────────
     def _seek_press(self):
         self.seeking = True
 
     def _seek_release(self):
-        self._seek_frame = int(self.progress_var.get())
+        with self.cap_lock:
+            self._seek_frame = int(self.progress_var.get())
         self.seeking = False
 
     def _on_scrub(self, val):
@@ -292,9 +315,17 @@ class PyStage:
         self.play_btn.config(text="▶  Play " if self.paused else "⏸  Pause")
 
     def _restart(self):
-        self._seek_frame = 0
+        with self.cap_lock:
+            self._seek_frame = 0
         if self.paused:
             self._toggle_pause()
+
+    def _toggle_color(self):
+        """Toggle color mode on/off at runtime."""
+        self.use_color = not self.use_color
+        self.color_btn.config(text="🎨 Color: ON" if self.use_color else "🎨 Color: OFF")
+        # Color tags will be initialized automatically on next render if needed
+        # No need to re-render current frame - next frame picks up new setting
 
     def _open_new(self):
         path = filedialog.askopenfilename(
@@ -306,19 +337,24 @@ class PyStage:
             return
         self.running = False
         time.sleep(0.2)
-        self.cap.release()
+        with self.cap_lock:
+            if self.cap:
+                self.cap.release()
         self.video_path = path
         self._open_video()
         self.progress.config(to=self.total_frames - 1)
         self.fname_lbl.config(text=f"  {os.path.basename(path)}")
         self._recalc_grid()
         self.running = True
-        self.paused  = False
+        self.paused = False
         self.play_btn.config(text="⏸  Pause")
         self._start_playback()
 
     def _quit(self):
         self.running = False
+        with self.cap_lock:
+            if self.cap:
+                self.cap.release()
         self.root.after(200, self.root.destroy)
 
     # ── Playback thread ────────────────────────────────────────────────────────
@@ -326,47 +362,73 @@ class PyStage:
         threading.Thread(target=self._play_loop, daemon=True).start()
 
     def _play_loop(self):
-        delay = 1.0 / self.fps
+        frame_interval = 1.0 / self.fps
+        next_frame_time = time.perf_counter()
+
         while self.running:
-            if self._seek_frame is not None:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, self._seek_frame)
-                self._seek_frame = None
+            seek_to = None
+            with self.cap_lock:
+                if self._seek_frame is not None:
+                    seek_to = self._seek_frame
+                    self._seek_frame = None
+            if seek_to is not None:
+                with self.cap_lock:
+                    if self.cap:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, seek_to)
 
             if self.paused or self.seeking:
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
 
-            t0 = time.perf_counter()
-            ret, frame = self.cap.read()
-            if not ret:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
+            with self.cap_lock:
+                if not self.cap:
+                    time.sleep(0.02)
+                    continue
+                ret, frame = self.cap.read()
+                if not ret:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                cur_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
 
-            cur  = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            cols = self.ascii_cols
-            rows = self.ascii_rows
+            # Use current color setting (read in main thread later via after)
+            lines, color_indices = frame_to_ascii(frame, self.ascii_cols, self.ascii_rows,
+                                                  self.palette, self.use_color)
+            self.root.after(0, self._update_display, lines, color_indices, cur_frame)
 
-            lines, pixels = frame_to_ascii(frame, cols, rows, self.palette)
-            self.root.after(0, self._update_display, lines, pixels, cur)
+            next_frame_time += frame_interval
+            sleep_time = next_frame_time - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                next_frame_time = time.perf_counter() + frame_interval
 
-            sleep_t = delay - (time.perf_counter() - t0)
-            if sleep_t > 0:
-                time.sleep(sleep_t)
+    # ── Render ASCII with or without color ─────────────────────────────────────
+    def _init_color_tags(self):
+        if self._color_tags_initialized:
+            return
+        for idx, (r, g, b) in enumerate(COLOR_PALETTE_RGB):
+            color_name = f"#{r:02x}{g:02x}{b:02x}"
+            self.text.tag_configure(color_name, foreground=color_name)
+        self._color_tags_initialized = True
 
-    # ── Render frame ───────────────────────────────────────────────────────────
-    def _update_display(self, lines, pixels, cur_frame):
+    def _update_display(self, lines, color_indices, cur_frame):
+        if not self.running:
+            return
+
         self.text.config(state="normal")
         self.text.delete("1.0", "end")
 
-        if self.use_color:
-            for y, line in enumerate(lines):
-                for x, ch in enumerate(line):
-                    r = int(pixels[y, x, 0])
-                    g = int(pixels[y, x, 1])
-                    b = int(pixels[y, x, 2])
+        if self.use_color and color_indices is not None:
+            self._init_color_tags()
+            rows = len(lines)
+            cols = len(lines[0]) if rows > 0 else 0
+            for y in range(rows):
+                row_chars = lines[y]
+                row_colors = color_indices[y]
+                for x in range(cols):
+                    ch = row_chars[x]
+                    r, g, b = COLOR_PALETTE_RGB[row_colors[x]]
                     tag = f"#{r:02x}{g:02x}{b:02x}"
-                    if tag not in self.text.tag_names():
-                        self.text.tag_configure(tag, foreground=tag)
                     self.text.insert("end", ch, tag)
                 self.text.insert("end", "\n")
         else:
@@ -384,19 +446,16 @@ class PyStage:
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="PyStage — ASCII video player")
-    parser.add_argument("video",    nargs="?", default=None)
-    parser.add_argument("--color",  action="store_true")
-    parser.add_argument("--detail", action="store_true")
+    parser.add_argument("video", nargs="?", default=None)
+    parser.add_argument("--color", action="store_true", help="Start with color mode ON")
+    parser.add_argument("--detail", action="store_true", help="Use detailed grayscale palette")
     args = parser.parse_args()
 
     palette = PALETTE_DETAILED if args.detail else PALETTE_SIMPLE
-
     root = tk.Tk()
 
     video_path = args.video
     if not video_path:
-        # Hide root while file picker is open — prevents it from
-        # spawning as a blank window and minimizing to taskbar
         root.withdraw()
         video_path = filedialog.askopenfilename(
             title="PyStage — Open a video",
@@ -406,7 +465,6 @@ def main():
         if not video_path:
             root.destroy()
             return
-        # Bring window back, focused and on top
         root.deiconify()
         root.lift()
         root.focus_force()
