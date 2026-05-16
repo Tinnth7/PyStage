@@ -1,5 +1,8 @@
 """
-pystage.py — ASCII video player with color toggle in UI.
+pystage.py — ASCII video player with color toggle, about dialog, and proper window sizing.
+
+Requirements:
+    pip install opencv-python pillow numpy
 
 Usage:
     python pystage.py                        # opens file picker
@@ -13,14 +16,13 @@ import os
 import time
 import argparse
 import threading
+import webbrowser
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, font
 from PIL import Image
 import numpy as np
 
-print("Script started", flush=True)
-
-# ── Char palettes (dark→dense, bright→sparse) ─────────────────────────────────
+# ── Char palettes ─────────────────────────────────────────────────────────────
 PALETTE_DETAILED = r'@#MW&8%B$*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,"^`. '
 PALETTE_SIMPLE   = "@#S%?*+;:,. "
 
@@ -36,33 +38,19 @@ ACCENT   = "#00ff88"
 FONT     = "Courier New"
 FONT_SZ  = 9
 
-# ── Color quantization (216 colors: 6x6x6 RGB cube) ───────────────────────────
-def build_color_palette():
-    """Create a list of 216 RGB tuples and corresponding Tkinter color names."""
-    colors = []
-    for r in range(0, 256, 51):      # 0, 51, 102, 153, 204, 255
-        for g in range(0, 256, 51):
-            for b in range(0, 256, 51):
-                colors.append((r, g, b))
-    # Precompute nearest neighbor lookup table for 256x256x256 RGB space
-    lookup = np.zeros((256, 256, 256), dtype=np.uint8)
-    for r in range(256):
-        for g in range(256):
-            for b in range(256):
-                best_idx = 0
-                best_dist = 195075
-                for i, (pr, pg, pb) in enumerate(colors):
-                    dr = r - pr
-                    dg = g - pg
-                    db = b - pb
-                    dist = dr*dr + dg*dg + db*db
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_idx = i
-                lookup[r, g, b] = best_idx
-    return colors, lookup
+# ── Color quantization (216 colors, instant) ───────────────────────────────────
+COLOR_PALETTE_RGB = []
+for r in range(0, 256, 51):
+    for g in range(0, 256, 51):
+        for b in range(0, 256, 51):
+            COLOR_PALETTE_RGB.append((r, g, b))
 
-COLOR_PALETTE_RGB, COLOR_LOOKUP = build_color_palette()
+def quantize_color_indices(rgb_image):
+    """Convert RGB image (rows, cols, 3) to palette indices using integer division."""
+    r_idx = rgb_image[:, :, 0] // 51  # 0..5
+    g_idx = rgb_image[:, :, 1] // 51
+    b_idx = rgb_image[:, :, 2] // 51
+    return r_idx * 36 + g_idx * 6 + b_idx  # 0..215
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def fmt_time(seconds):
@@ -72,7 +60,6 @@ def fmt_time(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 def frame_to_ascii(frame_bgr, cols, rows, palette, use_color=False):
-    """Convert frame to ASCII lines and (if color) a matrix of color indices."""
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb).resize((cols, rows), Image.BILINEAR)
     pixels = np.array(pil_img)
@@ -88,7 +75,7 @@ def frame_to_ascii(frame_bgr, cols, rows, palette, use_color=False):
     lines = ["".join(palette[indices[y, x]] for x in range(cols)) for y in range(rows)]
 
     if use_color:
-        color_indices = COLOR_LOOKUP[pixels[:,:,0], pixels[:,:,1], pixels[:,:,2]]
+        color_indices = quantize_color_indices(pixels)
         return lines, color_indices
     else:
         return lines, None
@@ -99,7 +86,7 @@ class PyStage:
     def __init__(self, root, video_path, use_color, palette):
         self.root = root
         self.video_path = video_path
-        self.use_color = use_color          # can be toggled later
+        self.use_color = use_color
         self.palette = palette
 
         self.paused = False
@@ -161,18 +148,15 @@ class PyStage:
         self.display.pack(fill="both", expand=True, padx=4, pady=(2, 0))
         self.display.bind("<Configure>", self._on_display_resize)
 
-        # Centering frame
-        self.center_frame = tk.Frame(self.display, bg=BG_COLOR)
-        self.center_frame.place(relx=0.5, rely=0.5, anchor="center")
-
+        # Text widget (centered originally, but we'll let it fill)
         self.text = tk.Text(
-            self.center_frame,
+            self.display,
             font=(FONT, FONT_SZ),
             bg=BG_COLOR, fg=FG_COLOR,
             insertwidth=0, relief="flat",
             state="disabled", wrap="none", cursor="arrow",
         )
-        self.text.pack()
+        self.text.pack(fill="both", expand=True)
 
         # Controls
         ctrl = tk.Frame(self.root, bg=BAR_BG, pady=8)
@@ -204,21 +188,26 @@ class PyStage:
 
         self._btn(btn_row, "⏮  Restart", self._restart).pack(side="left", padx=5)
 
-        # ── NEW: Color toggle button ─────────────────────────────────────────
         self.color_btn = self._btn(btn_row, "🎨 Color: ON" if self.use_color else "🎨 Color: OFF",
                                    self._toggle_color)
         self.color_btn.pack(side="left", padx=5)
 
         self._btn(btn_row, "📂  Open", self._open_new).pack(side="left", padx=5)
+
+        # About button
+        self._btn(btn_row, "❓ About", self._show_about).pack(side="left", padx=5)
+
         self._btn(btn_row, "✕  Quit", self._quit, fg="#ff4444").pack(side="left", padx=5)
 
         self.root.bind("<space>", lambda e: self._toggle_pause())
         self.root.bind("<Escape>", lambda e: self._quit())
         self.root.bind("<r>", lambda e: self._restart())
-        self.root.bind("<c>", lambda e: self._toggle_color())   # keyboard shortcut
+        self.root.bind("<c>", lambda e: self._toggle_color())
+        self.root.bind("<a>", lambda e: self._show_about())
+        self.root.bind("<A>", lambda e: self._show_about())
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
-        # Initial window size
+        # Initial window size (no maxsize restriction)
         scr_w = self.root.winfo_screenwidth()
         scr_h = self.root.winfo_screenheight()
         win_w = min(960, int(scr_w * 0.90))
@@ -229,7 +218,7 @@ class PyStage:
         if content_w_from_h < win_w:
             win_w = max(480, content_w_from_h + 8)
         self.root.geometry(f"{win_w}x{win_h}")
-        self.root.maxsize(int(scr_w * 0.98), int(scr_h * 0.95))
+        # NOTE: maxsize is NOT set – window can fill screen properly
 
         self.root.after(150, self._measure_char)
 
@@ -288,10 +277,9 @@ class PyStage:
             cols = max(10, int(rows * char_aspect / self.vid_aspect))
         self.ascii_cols = cols
         self.ascii_rows = rows
-        self.text.config(width=cols, height=rows)
-        px_w = int(cols * self._char_w)
-        px_h = int(rows * self._char_h)
-        self.center_frame.config(width=px_w, height=px_h)
+        # No need to set text widget size precisely – it's already filling with pack(fill=both)
+        # But we keep as reference for frame conversion
+        self.text.config(width=cols, height=rows)   # helps with initial sizing
 
     def _on_display_resize(self, event):
         if self._resize_after_id:
@@ -323,11 +311,47 @@ class PyStage:
             self._toggle_pause()
 
     def _toggle_color(self):
-        """Toggle color mode on/off at runtime."""
         self.use_color = not self.use_color
         self.color_btn.config(text="🎨 Color: ON" if self.use_color else "🎨 Color: OFF")
-        # Color tags will be initialized automatically on next render if needed
-        # No need to re-render current frame - next frame picks up new setting
+
+    def _show_about(self):
+        about_win = tk.Toplevel(self.root)
+        about_win.title("About PyStage")
+        about_win.configure(bg=BG_COLOR)
+        about_win.geometry("500x250")
+        about_win.resizable(False, False)
+        about_win.transient(self.root)
+        about_win.grab_set()
+
+        frame = tk.Frame(about_win, bg=BG_COLOR, padx=20, pady=20)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text="PyStage", font=(FONT, 18, "bold"),
+                 bg=BG_COLOR, fg=ACCENT).pack(pady=(0, 5))
+        tk.Label(frame, text="Beta v0.2 HOTFIX", font=(FONT, 10),
+                 bg=BG_COLOR, fg=TIME_FG).pack()
+
+        tk.Frame(frame, height=2, bg=ACCENT).pack(fill="x", pady=15)
+
+        github_url = "https://github.com/Tinnth7/PyStage"
+        github_link = tk.Label(frame, text=f"📦 GitHub: {github_url}",
+                               font=(FONT, 10), bg=BG_COLOR, fg=FG_COLOR,
+                               cursor="hand2")
+        github_link.pack(anchor="w", pady=2)
+        github_link.bind("<Button-1>", lambda e: webbrowser.open(github_url))
+
+        creator_url = "https://www.comradelituz.straw.page"
+        creator_link = tk.Label(frame, text=f"👤 Creator: {creator_url}",
+                                font=(FONT, 10), bg=BG_COLOR, fg=FG_COLOR,
+                                cursor="hand2")
+        creator_link.pack(anchor="w", pady=2)
+        creator_link.bind("<Button-1>", lambda e: webbrowser.open(creator_url))
+
+        tk.Button(frame, text="Close", command=about_win.destroy,
+                  font=(FONT, 9), bg=BTN_BG, fg=BTN_FG,
+                  activebackground=ACCENT, activeforeground=BG_COLOR,
+                  relief="flat", padx=15, pady=4, cursor="hand2",
+                  bd=0).pack(pady=(15, 0))
 
     def _open_new(self):
         path = filedialog.askopenfilename(
@@ -392,7 +416,6 @@ class PyStage:
                     continue
                 cur_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
 
-            # Use current color setting (read in main thread later via after)
             lines, color_indices = frame_to_ascii(frame, self.ascii_cols, self.ascii_rows,
                                                   self.palette, self.use_color)
             self.root.after(0, self._update_display, lines, color_indices, cur_frame)
