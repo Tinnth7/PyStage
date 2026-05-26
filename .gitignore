@@ -1,0 +1,3 @@
+echo ".vs/" >> .gitignore
+echo "*.ipch" >> .gitignore
+echo "cs/x64/" >> .gitignore
