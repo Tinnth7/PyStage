@@ -52,4 +52,4 @@ Contributions, bug reports, and suggestions are welcome.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](https://github.com/Tinnth7/CStage/blob/cstage/LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](https://github.com/Tinnth7/CStage?tab=MIT-1-ov-file) file for details.
